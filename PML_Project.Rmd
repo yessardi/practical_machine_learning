@@ -1,0 +1,216 @@
+---
+title: "PML_Project"
+author: "Dinesh SR"
+date: "July 17, 2016"
+output: 
+  html_document: 
+    keep_md: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(cache = TRUE)
+```
+
+## Prediction of exercise class using accelerometer readings
+
+###Executive Summary
+This objective of this classification exercise is to predict the classes of exercise using measurements of accelerometer attached to the body of subjects. The different classes indicate if the subject had followed the instructions correctly or not, and if they haven't, then the different types of incorrect procedures. More details can be found at http://groupware.les.inf.puc-rio.br/har. The given data was cleaned up, transformed, partitioned and different classifers were fit with varying levels of accuracy. The best classifier, chosen based on out-of-sample accuracy on the hold-out set was used to predict the class of 20 test set records required
+
+### Data Preparation and Pre-processing
+1. Load the datasets and examine them
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+# Download data from given URLs
+if (!file.exists("pmldata")) {dir.create("pmldata")}
+fileUrl1 = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+fileUrl2 = "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+download.file(fileUrl1, destfile = "./pmldata/pml-training.csv",mode = "wb")
+download.file(fileUrl2, destfile = "./pmldata/pml-testing.csv",mode = "wb")
+dateDownloaded = date()
+data = read.csv("./pmldata/pml-training.csv",stringsAsFactors = FALSE)
+testing = read.csv("./pmldata/pml-testing.csv",stringsAsFactors = FALSE)
+#str(data)
+#summary(data)
+#head(data)
+dim(data);dim(testing)
+```
+***Remarks:-***  
+Raw data and testing datasets have been loaded and have **160** varibles each
+
+2. Clean/tranform the data into a format suitable for analysis
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+# Load the libraries
+library(caret)
+library(caretEnsemble)
+library(corrplot)
+library(doParallel)
+
+# Remove missing data
+pMiss = function(x){sum(is.na(x)|x=="")/length(x)*100}
+missing = which(apply(data,2,pMiss)>95)
+data = data[,-missing]
+# Remove near zero variance data
+nzv = nearZeroVar(data,saveMetrics = TRUE)$nzv
+data = data[,-which(nzv)]
+# Remove non-relevant data
+data$X = NULL
+data$raw_timestamp_part_1 = NULL
+data$raw_timestamp_part_2 = NULL
+data$cvtd_timestamp = NULL
+data$user_name = NULL
+data$new_window = NULL
+# Tranform the response variable
+data$classe = as.factor(data$classe)
+dim(data)
+# calculate correlation matrix
+corrM <- cor(data[,-54])
+# find attributes that are highly corrected (>=0.8)
+highlyCorrelated <- findCorrelation(corrM, cutoff=0.8)
+corrHC <- cor(data[,highlyCorrelated])
+# plot highly correlated variables
+corrplot(corrHC,method = "color")
+# Split given data into training and validation sets
+set.seed(123)
+inTrain = createDataPartition(data$classe, p = 3/4)[[1]]
+training = data[ inTrain,]
+validate = data[-inTrain,]
+dim(training);dim(validate)
+# Transform training data variables using principal component analysis
+preProc = preProcess(training[,-54],method = "pca",thresh=0.99)
+trainPCA = predict(preProc,training[,-54])
+validPCA = predict(preProc,validate[,-54])
+dim(trainPCA);dim(validPCA)
+# Retrofit the changes and sync-up testing data set
+testing = testing[,-missing]
+testing = testing[,-which(nzv)]
+testing$X = NULL
+testing$raw_timestamp_part_1 = NULL
+testing$raw_timestamp_part_2 = NULL
+testing$cvtd_timestamp = NULL
+testing$user_name = NULL
+testing$new_window = NULL
+testing$problem_id = NULL
+testPCA = predict(preProc,testing)
+dim(testPCA)
+```
+
+***Remarks:-***   
+
++ Data variables with substantial(>95%) missing values were removed. This reduced the number of variables to 60 from 160
++ Variables with near zero variance were removed reducing the count to 59
++ Variables quite unlikely to influence accelorometer readings like user name, time stamp etc were removed further reducing the variable count to 54
++ And to get rid of the substantial number of variables who were highly correlated and also to normalize variables to same scale, principal component analysis was applied with a threshold value of 0.99 which yielded 37 orthogonal vectors which accounted for 99% of the variance
++ All of the above changes were applied to testing data set to standardize the variables
++ The given data was split into training and validation sets at a ratio of 75:25 to fit the models and verify their out-of-sample accuracy
+
+### Model fitting and Analysis
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+# Check the distribution of the response variable
+barplot(prop.table(table(data$classe)),col = "skyblue",main="Response Class Distribution",ylab = "%")
+# Register for parallel processing
+cl = makeCluster(detectCores(), type='PSOCK')
+registerDoParallel(cl)
+# Initialise training control parameters
+ctrl <- trainControl(method = "cv",
+                     number=10,
+                     classProbs = TRUE,
+                     allowParallel=TRUE)
+
+# Fit a linear discriminant model to the training data
+set.seed(123)
+modelFitLDA = train(training$classe ~ .,
+                     method = "lda",
+                     data = trainPCA,
+                     trControl = ctrl)
+# Verify in-sample accuracy
+modelFitLDA$results
+# Verify out-of-sample accuracy
+predictLDA = predict(modelFitLDA,newdata=validPCA)
+accuracyLDA = confusionMatrix(validate$classe , predict(modelFitLDA,validPCA))
+round(accuracyLDA$overall,digits = 2)
+
+# Fit a random forest model to the data
+set.seed(123)
+modelFitRF = train(training$classe~.,
+                data=trainPCA,
+                method = "rf",
+                ntree=500,
+                nodesize=1,
+                trControl = ctrl)
+# Verify in-sample accuracy
+modelFitRF$results
+# Verify out-of-sample accuracy
+predictRF = predict(modelFitRF,newdata=validPCA)
+accuracyRF = confusionMatrix(validate$classe , predict(modelFitRF,validPCA))
+round(accuracyRF$overall,digits = 2)
+
+# Fit a gradient boosting model
+set.seed(123)
+modelFitGBM =  train(training$classe ~ .,
+                     method = "gbm",
+                     data=trainPCA,
+                     verbose = FALSE,
+                     trControl = ctrl)
+# Verify in-sample accuracy
+modelFitGBM$results
+# Verify out-of-sample accuracy
+predictGBM = predict(modelFitGBM,newdata=validPCA)
+accuracyGBM = confusionMatrix(validate$classe , predict(modelFitGBM,validPCA))
+round(accuracyGBM$overall,digits = 2)
+# Compare accuracy of models
+model_list = list(LDA = modelFitLDA,RF  = modelFitRF,GBM = modelFitGBM)
+resamps = resamples(list(LDA = modelFitLDA,
+                         RF  = modelFitRF,
+                         GBM = modelFitGBM))
+summary(resamps)
+# Compare ratio of prediction matches
+accuClass = function(values,prediction)
+{sum(prediction == values)/length(values)}
+accuClass(predictRF,predictLDA)
+accuClass(predictGBM,predictLDA)
+accuClass(predictRF,predictGBM)
+# Compare model correlation
+modelCor(resamps)
+# Model stacking
+predDF = data.frame(predictRF,predictGBM,classe = validate$classe)
+combmodFit = train(classe ~ .,method = "rf",data=predDF,prox = TRUE)
+combPred = predict(combmodFit,predDF)
+accuracyCOMB = confusionMatrix(validate$classe, combPred)
+round(accuracyCOMB$overall,digits = 2)
+```
+
+***Remarks:-***   
+
++ The types and distribution of response variable **classe** was examined thru a barplot. There were five distinct classes A,B,C,D,E and the distribution seemed fairly proportionate for all classes barring A which was the dominant class
++ Considering the nearly balanced classes and also the multiplicity of classes, three popular classifiers namely **Linear Discriminant Analysis, Random Forests, Gradient Boosting Method** were chosen for model fitting exercise. Decision trees is not required as we are concerned with model prediction accuracy rather than interpretability while other popular classifiers like logistic regression and SVM were not considered since they are more suited to binary classification scenarios. Naive Bayes method wasn't considered given the highly correlated nature of data 
++ Resampling with 10 fold cross validation method was used to train the models on training set **trainPCA**. The hold out dataset **validPCA** was used to assess the out-of-sample variance of the models. Since the distribution of response class was fairly balanced, **Accuracy** measure was used to compare the performances both in- sample and out-of-sample. 
++ Random forest model had the best  in-sample/out-of-sample accuracy of 98% while GBM predictions were about 86% accurate and LDA had an accuracy of only 63% indicating that the response/predictor relation was more non-linear in nature
++ Further tests were carried out to compare the prediction matches across models and also their correlation. 
++ The two best performing models RF and GBM were stacked together and an ensemble model was fitted using RF classifier to check for any further improvement in prediction accuracy. The ensemble model also had only 98% accuracy on out-of-sample prediction
+
+### Final Model Selection and Test Set Class Prediction
+```{r, echo=TRUE, warning=FALSE, message=FALSE}
+# Fit the final model using full data and predictor set
+set.seed(123)
+modelFitBest = train(classe~.,
+                data=data,
+                method = "rf",
+                ntree=500,
+                nodesize=1,
+                trControl = ctrl)
+# estimate variable importance
+importance = varImp(modelFitBest, scale=FALSE)
+# plot importance
+plot(importance)
+# Predict Class of Test data
+predictTest = predict(modelFitBest,newdata=testing)
+predictTest
+#Stop parallel cluster
+stopCluster(cl)
+```
+
+***Remarks:-***   
+
++ Given that random forest model and ensemble model had a similar out-of-sample accuracy rate of 98%, the simpler one random forest model was chosen as the best model to do the final test data prediction
++ The final model was fit using RF with the full original data and all 53 predictors and it had an in sample accuracy of 99.86%
++ The variable importance ranking of the predictors was verified
++ The final model was used to predict the class of 20 untouched test set data.The class predictions were submitted to Prediction Project Quiz and had an accuracy of 100% 
